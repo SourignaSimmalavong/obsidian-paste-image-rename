@@ -1,7 +1,7 @@
 import {
-  App,
-  Vault,
-  TFolder,
+	App,
+	Vault,
+	TFolder,
 } from 'obsidian';
 
 export const DEBUG = !(process.env.BUILD_ENV === 'production')
@@ -94,10 +94,15 @@ export const getDirectoryPath = (tFolder: TFolder): string => {
 }
 
 const filenameNotAllowedChars = /[^\p{L}0-9~`!@$&*()\-_=+{};'",<.>? ]/ug
+const linkNotAllowedChars = /[^\p{L}0-9~`!@$&*()\-_=+{};'",<.>? :/]/ug
 
 export const sanitizer = {
 	filename(s: string): string {
 		return s.replace(filenameNotAllowedChars, '').trim()
+	},
+
+	link(s: string): string {
+		return s.replace(linkNotAllowedChars, '').trim()
 	},
 
 	delimiter(s: string): string {
@@ -110,7 +115,7 @@ export const sanitizer = {
 
 // ref: https://stackoverflow.com/a/6969486/596206
 export function escapeRegExp(s: string) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 
@@ -140,7 +145,7 @@ interface VaultWithConfig extends Vault {
 	config?: VaultConfig,
 }
 
-export function getVaultConfig(app: App): VaultConfig|null {
+export function getVaultConfig(app: App): VaultConfig | null {
 	const vault = app.vault as VaultWithConfig
 	return vault.config
 }

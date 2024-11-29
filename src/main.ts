@@ -10,32 +10,34 @@
  * - [ ] add rules for moving matched images to destination folder
  */
 import {
-  App,
-  HeadingCache,
-  ListedFiles,
-  MarkdownView,
-  Modal,
-  Notice,
-  Plugin,
-  PluginSettingTab,
-  Setting,
-  TAbstractFile,
-  TFile,
+	App,
+	FileSystemAdapter,
+	HeadingCache,
+	ListedFiles,
+	MarkdownView,
+	Modal,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	TAbstractFile,
+	TFile,
 } from 'obsidian';
 
 import { ImageBatchRenameModal } from './batch';
 import { renderTemplate } from './template';
 import {
-  createElementTree,
-  DEBUG,
-  debugLog,
-  escapeRegExp,
-  lockInputMethodComposition,
-  NameObj,
-  path,
-  sanitizer,
-  getDirectoryPath,
+	createElementTree,
+	DEBUG,
+	debugLog,
+	escapeRegExp,
+	lockInputMethodComposition,
+	NameObj,
+	path,
+	sanitizer,
+	getDirectoryPath,
 } from './utils';
+import * as fs from "fs";
 
 interface PluginSettings {
 	// {{imageNameKey}}-{{DATE:YYYYMMDD}}
@@ -47,6 +49,8 @@ interface PluginSettings {
 	handleAllAttachments: boolean
 	excludeExtensionPattern: string
 	disableRenameNotice: boolean
+	rootDirPhysical: string
+	rootDirView: string
 }
 
 const DEFAULT_SETTINGS: PluginSettings = {
@@ -58,6 +62,8 @@ const DEFAULT_SETTINGS: PluginSettings = {
 	handleAllAttachments: false,
 	excludeExtensionPattern: '',
 	disableRenameNotice: false,
+	rootDirPhysical: '',
+	rootDirView: ''
 }
 
 const PASTED_IMAGE_PREFIX = 'Pasted image '
@@ -139,7 +145,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 			return
 		}
 
-		const { stem, newName, isMeaningful }= this.generateNewName(file, activeFile)
+		const { stem, newName, isMeaningful } = this.generateNewName(file, activeFile)
 		debugLog('generated newName:', newName, isMeaningful)
 
 		if (!isMeaningful || !autoRename) {
@@ -151,7 +157,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 
 	async renameFile(file: TFile, inputNewName: string, sourcePath: string, replaceCurrentLine?: boolean) {
 		// deduplicate name
-		const { name:newName } = await this.deduplicateNewName(inputNewName, file)
+		const { name: newName } = await this.deduplicateNewName(inputNewName, file)
 		debugLog('deduplicated newName:', newName)
 		const originName = file.name
 
@@ -162,13 +168,23 @@ export default class PasteImageRenamePlugin extends Plugin {
 		// const newPath = path.join(file.parent.path, newName)
 		try {
 			// get directory part of new path
-			const newPathDirectory = path.directory(newName)
-			// check if directory exists
-			const newPathDirectoryExists = await this.app.vault.adapter.exists(newPathDirectory)
-			// create directory
-			if (!newPathDirectoryExists) await this.app.vault.createFolder(newPathDirectory)
-			// execute rename
-			await this.app.fileManager.renameFile(file, newName)
+			let newPathDirectory = path.directory(newName)
+			if (this.settings.rootDirPhysical == '') {
+				// check if directory exists
+				const newPathDirectoryExists = await this.app.vault.adapter.exists(newPathDirectory)
+				// create directory
+				if (!newPathDirectoryExists) await this.app.vault.createFolder(newPathDirectory)
+				// execute rename
+				await this.app.fileManager.renameFile(file, newName)
+			} else {
+				newPathDirectory = path.join(this.settings.rootDirPhysical, newPathDirectory)
+				if (!fs.existsSync(newPathDirectory)) {
+					fs.mkdirSync(newPathDirectory, { recursive: true });
+				}
+				const vaultBasePath = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
+				fs.renameSync(path.join(vaultBasePath, file.path), path.join(this.settings.rootDirPhysical, newName))
+			}
+
 		} catch (err) {
 			new Notice(`Failed to rename ${newName}: ${err}`)
 			throw err
@@ -181,7 +197,22 @@ export default class PasteImageRenamePlugin extends Plugin {
 		// in case fileManager.renameFile may not update the internal link in the active file,
 		// we manually replace the current line by manipulating the editor
 
-		const newLinkText = this.app.fileManager.generateMarkdownLink(file, sourcePath)
+		let newLinkText = '';
+		if (this.settings.rootDirPhysical == '') {
+			newLinkText = this.app.fileManager.generateMarkdownLink(file, sourcePath)
+		}
+		else {
+			const extension = path.extension(newName).toLowerCase()
+			const viewPath = path.join(this.settings.rootDirView, newName)
+			if (IMAGE_EXTS.contains(extension)) {
+				newLinkText = `![${path.basename(newName)}](${viewPath})`
+			} else if (VIDEO_EXTS.contains(extension)) {
+				newLinkText = `<video controls src="${viewPath}" style />`
+			} else {
+				new Notice(`Unhandled attachment type: ${extension}`)
+
+			}
+		}
 		debugLog('replace text', linkText, newLinkText)
 
 		const editor = this.getActiveEditor()
@@ -198,8 +229,8 @@ export default class PasteImageRenamePlugin extends Plugin {
 		editor.transaction({
 			changes: [
 				{
-					from: {...cursor, ch: 0},
-					to: {...cursor, ch: line.length},
+					from: { ...cursor, ch: 0 },
+					to: { ...cursor, ch: line.length },
 					text: replacedLine,
 				}
 			]
@@ -212,7 +243,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 
 	openRenameModal(file: TFile, newName: string, sourcePath: string) {
 		const modal = new ImageRenameModal(
-			this.app, file as TFile, newName,
+			this.app, file as TFile, newName, this.settings.rootDirPhysical, this.settings.rootDirView,
 			(confirmedName: string) => {
 				debugLog('confirmedName:', confirmedName)
 				this.renameFile(file, confirmedName, sourcePath, true)
@@ -259,7 +290,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 			if (!m0) return
 
 			// rename
-			const { newName, isMeaningful }= this.generateNewName(file, activeFile)
+			const { newName, isMeaningful } = this.generateNewName(file, activeFile)
 			debugLog('generated newName:', newName, isMeaningful)
 			if (!isMeaningful) {
 				new Notice('Failed to batch rename images: the generated name is not meaningful')
@@ -356,9 +387,9 @@ export default class PasteImageRenamePlugin extends Plugin {
 			const newNumber = dupNameNumbers.length > 0 ? Math.max(...dupNameNumbers) + 1 : 1
 			// change newName
 			if (this.settings.dupNumberAtStart) {
-				newName = `${newNumber}${delimiter}${newNameStem}.${newNameExt}`
+				newName = path.join(this.settings.rootDirPhysical, `${newNumber}${delimiter}${newNameStem}.${newNameExt}`)
 			} else {
-				newName = `${newNameStem}${delimiter}${newNumber}.${newNameExt}`
+				newName = path.join(this.settings.rootDirPhysical, `${newNameStem}${delimiter}${newNumber}.${newNameExt}`)
 			}
 		}
 
@@ -432,6 +463,10 @@ const IMAGE_EXTS = [
 	'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg',
 ]
 
+const VIDEO_EXTS = [
+	'mpg', 'avi', 'mov', 'mkv', 'mp4',
+]
+
 function isImage(file: TAbstractFile): boolean {
 	if (file instanceof TFile) {
 		if (IMAGE_EXTS.contains(file.extension.toLowerCase())) {
@@ -444,13 +479,17 @@ function isImage(file: TAbstractFile): boolean {
 class ImageRenameModal extends Modal {
 	src: TFile
 	stem: string
+	rootDirPhysical: string
+	rootDirView: string
 	renameFunc: (path: string) => void
 	onCloseExtra: () => void
 
-	constructor(app: App, src: TFile, stem: string, renameFunc: (path: string) => void, onClose: () => void) {
+	constructor(app: App, src: TFile, stem: string, rootDirPhysical: string, rootDirView: string, renameFunc: (path: string) => void, onClose: () => void) {
 		super(app);
 		this.src = src
 		this.stem = stem
+		this.rootDirPhysical = rootDirPhysical
+		this.rootDirView = rootDirView
 		this.renameFunc = renameFunc
 		this.onCloseExtra = onClose
 	}
@@ -472,7 +511,21 @@ class ImageRenameModal extends Modal {
 		let stem = this.stem
 		const ext = this.src.extension
 		const getNewName = (stem: string) => stem + '.' + ext
-		const getNewPath = (stem: string) => path.join(this.src.parent.path, getNewName(stem))
+		const rootDirPhysical = this.rootDirPhysical
+		const rootDirView = this.rootDirView
+		const getNewPath = (stem: string, is_physical: boolean) => {
+			if (rootDirPhysical == '') {
+				return path.join(this.src.parent.path, getNewName(stem))
+			}
+			else {
+				if (is_physical) {
+					return path.join(rootDirPhysical, getNewName(stem))
+				} else {
+					return path.join(rootDirView, getNewName(stem))
+				}
+
+			}
+		}
 
 		const infoET = createElementTree(contentEl, {
 			tag: 'ul',
@@ -500,7 +553,7 @@ class ImageRenameModal extends Modal {
 						},
 						{
 							tag: 'span',
-							text: getNewPath(stem),
+							text: getNewPath(stem, true),
 						}
 					],
 				}
@@ -516,10 +569,15 @@ class ImageRenameModal extends Modal {
 			.setName('New name')
 			.setDesc('Please input the new name for the image (without extension)')
 			.addText(text => text
-				.setValue(stem)
+				.setValue(getNewPath(stem, false))
 				.onChange(async (value) => {
-					stem = sanitizer.filename(value)
-					infoET.children[1].children[1].el.innerText = getNewPath(stem)
+					if (rootDirPhysical == '') {
+						stem = sanitizer.filename(value)
+					}
+					else {
+						stem = sanitizer.link(value)
+					}
+					infoET.children[1].children[1].el.innerText = getNewPath(stem, true)
 				}
 				))
 
@@ -609,7 +667,7 @@ class SettingTab extends PluginSettingTab {
 					this.plugin.settings.imageNamePattern = value;
 					await this.plugin.saveSettings();
 				}
-			));
+				));
 
 		new Setting(containerEl)
 			.setName('Duplicate number at start (or end)')
@@ -631,7 +689,7 @@ class SettingTab extends PluginSettingTab {
 					this.plugin.settings.dupNumberDelimiter = sanitizer.delimiter(value);
 					await this.plugin.saveSettings();
 				}
-			));
+				));
 
 		new Setting(containerEl)
 			.setName('Always add duplicate number')
@@ -653,7 +711,7 @@ class SettingTab extends PluginSettingTab {
 					this.plugin.settings.autoRename = value;
 					await this.plugin.saveSettings();
 				}
-			));
+				));
 
 		new Setting(containerEl)
 			.setName('Handle all attachments')
@@ -666,7 +724,7 @@ class SettingTab extends PluginSettingTab {
 					this.plugin.settings.handleAllAttachments = value;
 					await this.plugin.saveSettings();
 				}
-			));
+				));
 
 		new Setting(containerEl)
 			.setName('Exclude extension pattern')
@@ -680,7 +738,7 @@ class SettingTab extends PluginSettingTab {
 					this.plugin.settings.excludeExtensionPattern = value;
 					await this.plugin.saveSettings();
 				}
-			));
+				));
 
 		new Setting(containerEl)
 			.setName('Disable rename notice')
@@ -692,6 +750,39 @@ class SettingTab extends PluginSettingTab {
 					this.plugin.settings.disableRenameNotice = value;
 					await this.plugin.saveSettings();
 				}
-			));
+				));
+
+
+		const rootDirPhysicalDescr =
+			`Files are saved in <physical_root_directory>/<relative_dir_of_active_note>/<image_name>.
+This allows for attachments storage outside of the vault. Leave it empty to store attachments in default folder.`
+		new Setting(containerEl)
+			.setName('Physical root directory')
+			.setDesc(rootDirPhysicalDescr)
+			.setClass('long-description-setting-item')
+			.addText(text => text
+				.setPlaceholder('')
+				.setValue(this.plugin.settings.rootDirPhysical)
+				.onChange(async (value) => {
+					this.plugin.settings.rootDirPhysical = value;
+					await this.plugin.saveSettings();
+				}
+				));
+		const rootDirViewDescr =
+			`When using Root directory, files are displayed as \`![](<root_dir_view>/<relative_dir_of_active_note>/<image_name>)\`.
+This allows for attachments storage outside of the vault.`
+		new Setting(containerEl)
+			.setName('Root directory view')
+			.setDesc(rootDirViewDescr)
+			.setClass('long-description-setting-item')
+			.addText(text => text
+				.setPlaceholder('')
+				.setValue(this.plugin.settings.rootDirView)
+				.onChange(async (value) => {
+					this.plugin.settings.rootDirView = value;
+					await this.plugin.saveSettings();
+				}
+				));
+
 	}
 }
