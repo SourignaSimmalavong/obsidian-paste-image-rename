@@ -2,7 +2,10 @@ import {
 	App,
 	Vault,
 	TFolder,
+	ListedFiles,
 } from 'obsidian';
+import * as fs from "fs";
+import * as path2 from "path"
 
 export const DEBUG = !(process.env.BUILD_ENV === 'production')
 if (DEBUG) console.log('DEBUG is enabled')
@@ -81,6 +84,47 @@ export const path = {
 		const positions = [...fullpath.matchAll(new RegExp('\\.', 'gi'))].map(a => a.index)
 		return fullpath.slice(positions[positions.length - 1] + 1)
 	},
+
+	relative(baseDir: string, targetPath: string): string {
+		let rel: string = path2.relative(baseDir, targetPath)
+		rel = rel.replace(/\\/g, '/')
+
+		return rel
+	}
+}
+
+export async function getListedFiles(directory: string): Promise<ListedFiles> {
+	try {
+		// Read the files in the specified directory
+		const entries = await fs.promises.readdir(directory);
+
+		// Process entries to separate files and folders
+		const files: string[] = [];
+		const folders: string[] = [];
+
+		await Promise.all(
+			entries.map(async entry => {
+				const fullPath = path.join(directory, entry);
+				const stats = await fs.promises.stat(fullPath); // Check file stats
+
+				if (stats.isFile()) {
+					files.push(fullPath); // Add to files array
+				} else if (stats.isDirectory()) {
+					folders.push(fullPath); // Add to folders array
+				}
+			})
+		);
+
+		// Create the ListedFiles object
+		const listedFiles: ListedFiles = {
+			folders: folders, // Array of folder paths
+			files: files,  // Array of file paths
+		};
+
+		return listedFiles;
+	} catch (error) {
+		throw new Error(`Failed to list files in directory "${directory}": ${error.message}`);
+	}
 }
 
 /**
@@ -94,15 +138,21 @@ export const getDirectoryPath = (tFolder: TFolder): string => {
 }
 
 const filenameNotAllowedChars = /[^\p{L}0-9~`!@$&*()\-_=+{};'",<.>? ]/ug
-const linkNotAllowedChars = /[^\p{L}0-9~`!@$&*()\-_=+{};'",<.>? :/]/ug
+const fsFilenameNotAllowedChars = /[^\p{L}0-9~`!@$&*()\-_=+{};'",<.>? :/]/ug
 
 export const sanitizer = {
 	filename(s: string): string {
 		return s.replace(filenameNotAllowedChars, '').trim()
 	},
 
+	fs_filename(s: string): string {
+		return s.replace(fsFilenameNotAllowedChars, '').trim()
+	},
+
 	link(s: string): string {
-		return s.replace(linkNotAllowedChars, '').trim()
+		debugLog(`original string: ${s}`)
+		debugLog(`encodeURI: ${encodeURI(s)}`)
+		return encodeURI(s)
 	},
 
 	delimiter(s: string): string {

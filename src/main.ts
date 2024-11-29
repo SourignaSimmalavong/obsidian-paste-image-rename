@@ -36,6 +36,7 @@ import {
 	path,
 	sanitizer,
 	getDirectoryPath,
+	getListedFiles,
 } from './utils';
 import * as fs from "fs";
 
@@ -168,7 +169,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 		// const newPath = path.join(file.parent.path, newName)
 		try {
 			// get directory part of new path
-			let newPathDirectory = path.directory(newName)
+			const newPathDirectory = path.directory(newName)
 			if (this.settings.rootDirPhysical == '') {
 				// check if directory exists
 				const newPathDirectoryExists = await this.app.vault.adapter.exists(newPathDirectory)
@@ -177,12 +178,22 @@ export default class PasteImageRenamePlugin extends Plugin {
 				// execute rename
 				await this.app.fileManager.renameFile(file, newName)
 			} else {
-				newPathDirectory = path.join(this.settings.rootDirPhysical, newPathDirectory)
 				if (!fs.existsSync(newPathDirectory)) {
 					fs.mkdirSync(newPathDirectory, { recursive: true });
 				}
 				const vaultBasePath = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
-				fs.renameSync(path.join(vaultBasePath, file.path), path.join(this.settings.rootDirPhysical, newName))
+				const srcPath = path.join(vaultBasePath, file.path)
+				const targetPath = path.join(this.settings.rootDirPhysical, newName)
+				if (!fs.existsSync(srcPath)) {
+					new Notice(`Source path does not exist. Something went wrong!\nSource path: ${sourcePath}`)
+					throw new Error(`Source path does not exist. Something went wrong!\nSource path: ${sourcePath}`)
+				} else if (fs.existsSync(targetPath)) {
+					new Notice(`Target path already exists. Something went wrong!\nTarget path: ${targetPath}`)
+					throw new Error(`Target path already exists. Something went wrong!\nTarget path: ${targetPath}`)
+				}
+				else {
+					fs.renameSync(srcPath, targetPath)
+				}
 			}
 
 		} catch (err) {
@@ -203,7 +214,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 		}
 		else {
 			const extension = path.extension(newName).toLowerCase()
-			const viewPath = path.join(this.settings.rootDirView, newName)
+			const viewPath = sanitizer.link(path.join(this.settings.rootDirView, newName))
 			if (IMAGE_EXTS.contains(extension)) {
 				newLinkText = `![${path.basename(newName)}](${viewPath})`
 			} else if (VIDEO_EXTS.contains(extension)) {
@@ -340,12 +351,23 @@ export default class PasteImageRenamePlugin extends Plugin {
 	// newName: foo.ext
 	async deduplicateNewName(newName: string, file: TFile): Promise<NameObj> {
 		// confirmed new file path
-		const newFilePath = path.join(getDirectoryPath(file.parent), newName);
-		// list files in dir
-		const dir = path.directory(newFilePath) // file.parent.path
-		const dirExists = await this.app.vault.adapter.exists(dir)
-		const listed: false | ListedFiles = dirExists && await this.app.vault.adapter.list(dir)
-		debugLog('sibling files', listed)
+		newName = newName.replace('\\', '/')
+		let newFilePath = "";
+		let listed: false | ListedFiles = false;
+		if (this.settings.rootDirPhysical == '') {
+			// list files in dir
+			newFilePath = path.join(getDirectoryPath(file.parent), newName)
+			const dir = path.directory(newFilePath) // file.parent.path
+			const dirExists = await this.app.vault.adapter.exists(dir)
+			listed = dirExists && await this.app.vault.adapter.list(dir)
+		}
+		else {
+			// list files in dir
+			newFilePath = path.join(this.settings.rootDirPhysical, newName)
+			const dir = path.directory(newFilePath)
+			const dirExists = await fs.existsSync(dir)
+			listed = dirExists && await getListedFiles(dir)
+		}
 
 		// parse newName
 		const newNameExt = path.extension(newName),
@@ -367,9 +389,9 @@ export default class PasteImageRenamePlugin extends Plugin {
 		const dupNameNumbers: number[] = []
 		let isNewNameExist = false
 		if (listed) {
-			for (let sibling of listed.files) {
-				let siblingBasename = path.basename(sibling)
-				if (siblingBasename == newName) {
+			for (const sibling of listed.files) {
+				const siblingBasename = path.basename(sibling)
+				if (siblingBasename == path.basename(newName)) {
 					isNewNameExist = true
 					continue
 				}
@@ -386,10 +408,21 @@ export default class PasteImageRenamePlugin extends Plugin {
 			// get max number
 			const newNumber = dupNameNumbers.length > 0 ? Math.max(...dupNameNumbers) + 1 : 1
 			// change newName
-			if (this.settings.dupNumberAtStart) {
-				newName = path.join(this.settings.rootDirPhysical, `${newNumber}${delimiter}${newNameStem}.${newNameExt}`)
+			if (this.settings.rootDirPhysical == '') {
+				if (this.settings.dupNumberAtStart) {
+					newName = `${newNumber}${delimiter}${newNameStem}.${newNameExt}`
+				} else {
+					newName = `${newNameStem}${delimiter}${newNumber}.${newNameExt}`
+				}
 			} else {
-				newName = path.join(this.settings.rootDirPhysical, `${newNameStem}${delimiter}${newNumber}.${newNameExt}`)
+				const dir = path.directory(newNameStem)
+				const basename = path.basename(newNameStem)
+				if (this.settings.dupNumberAtStart) {
+					newName = `${newNumber}${delimiter}${basename}.${newNameExt}`
+				} else {
+					newName = `${basename}${delimiter}${newNumber}.${newNameExt}`
+				}
+				newName = path.relative(this.settings.rootDirPhysical, path.join(dir, newName))
 			}
 		}
 
@@ -523,7 +556,6 @@ class ImageRenameModal extends Modal {
 				} else {
 					return path.join(rootDirView, getNewName(stem))
 				}
-
 			}
 		}
 
@@ -556,7 +588,21 @@ class ImageRenameModal extends Modal {
 							text: getNewPath(stem, true),
 						}
 					],
+				},
+				{
+					tag: 'li',
+					children: [
+						{
+							tag: 'span',
+							text: 'New display link',
+						},
+						{
+							tag: 'span',
+							text: sanitizer.link(getNewPath(stem, false)),
+						}
+					],
 				}
+
 			]
 		})
 
@@ -569,15 +615,16 @@ class ImageRenameModal extends Modal {
 			.setName('New name')
 			.setDesc('Please input the new name for the image (without extension)')
 			.addText(text => text
-				.setValue(getNewPath(stem, false))
+				.setValue(stem)
 				.onChange(async (value) => {
 					if (rootDirPhysical == '') {
 						stem = sanitizer.filename(value)
 					}
 					else {
-						stem = sanitizer.link(value)
+						stem = sanitizer.fs_filename(value)
 					}
 					infoET.children[1].children[1].el.innerText = getNewPath(stem, true)
+					infoET.children[2].children[1].el.innerText = sanitizer.link(getNewPath(stem, false))
 				}
 				))
 
@@ -755,7 +802,10 @@ class SettingTab extends PluginSettingTab {
 
 		const rootDirPhysicalDescr =
 			`Files are saved in <physical_root_directory>/<relative_dir_of_active_note>/<image_name>.
-This allows for attachments storage outside of the vault. Leave it empty to store attachments in default folder.`
+This allows for attachments storage outside of the vault. Leave it empty to store attachments in default folder.
+If on Windows, whether use slashes or properly escape the backslash.
+e.g. \`C:\\\\myVaultServer\\\\\`
+     \`C:/myVaultServer/\``
 		new Setting(containerEl)
 			.setName('Physical root directory')
 			.setDesc(rootDirPhysicalDescr)
@@ -786,3 +836,4 @@ This allows for attachments storage outside of the vault.`
 
 	}
 }
+
