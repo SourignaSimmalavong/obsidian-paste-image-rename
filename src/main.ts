@@ -182,7 +182,7 @@ export default class PasteImageRenamePlugin extends Plugin {
 					fs.mkdirSync(newPathDirectory, { recursive: true });
 				}
 				const vaultBasePath = (this.app.vault.adapter as FileSystemAdapter).getBasePath();
-				const srcPath = path.join(vaultBasePath, file.path)
+				const srcPath = fs.realpathSync(path.join(vaultBasePath, file.path))
 				const targetPath = path.join(this.settings.rootDirPhysical, newName)
 				if (!fs.existsSync(srcPath)) {
 					new Notice(`Source path does not exist. Something went wrong!\nSource path: ${sourcePath}`)
@@ -192,6 +192,12 @@ export default class PasteImageRenamePlugin extends Plugin {
 					throw new Error(`Target path already exists. Something went wrong!\nTarget path: ${targetPath}`)
 				}
 				else {
+					const targetDir = path.directory(targetPath);
+					// Ensure the target parent directory exists
+					if (!fs.existsSync(targetDir)) {
+						fs.mkdirSync(targetDir, { recursive: true });
+						console.log(`Created target parent directory: ${targetDir}`);
+					}
 					fs.renameSync(srcPath, targetPath)
 				}
 			}
